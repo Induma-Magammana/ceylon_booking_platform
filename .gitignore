@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+*_logs.txt
+*.log
+signup_test.txt
+.DS_Store
+Thumbs.db
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/

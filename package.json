@@ -1,0 +1,48 @@
+{
+  "name": "ceylon-booking-platform",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "tsx watch src/api/index.ts",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build": "tsc",
+    "test": "vitest",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:coverage": "vitest run --coverage",
+    "docker:up": "docker compose up --build -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f"
+  },
+  "keywords": [
+    "tourism",
+    "booking",
+    "sri-lanka"
+  ],
+  "author": "I.N. Magammana",
+  "license": "ISC",
+  "dependencies": {
+    "@hono/node-server": "^1.19.9",
+    "hono": "^4.11.5",
+    "zod": "^4.3.6",
+    "mysql2": "^3.6.5",
+    "jsonwebtoken": "^9.1.2",
+    "bcrypt": "^5.1.1",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^25.0.10",
+    "@types/jsonwebtoken": "^9.0.5",
+    "@types/bcrypt": "^5.0.2",
+    "@vitest/coverage-v8": "^4.0.18",
+    "concurrently": "^9.2.1",
+    "dotenv": "^17.2.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}

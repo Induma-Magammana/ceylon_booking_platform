@@ -1,0 +1,16 @@
+node_modules
+dist
+.env
+.env.local
+.git
+.gitignore
+coverage
+*.log
+.DS_Store
+.vscode
+.idea
+frontend/node_modules
+frontend/dist
+frontend/.env
+supabase/.branches
+supabase/.temp
