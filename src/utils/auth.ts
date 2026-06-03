@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
-import { query } from './database';
+import { getDb, connectDB } from './database';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRE = '24h';
@@ -42,35 +42,38 @@ export const comparePassword = async (password: string, hash: string): Promise<b
     return bcrypt.compare(password, hash);
 };
 
+// Ensure DB connection is established before using these helpers
+const ensureDb = async () => {
+    try {
+        getDb();
+    } catch (e) {
+        await connectDB();
+    }
+};
+
 // Get user by email
 export const getUserByEmail = async (email: string): Promise<AuthUser | null> => {
-    const results: any = await query(
-        'SELECT id, email, user_type FROM users WHERE email = ?',
-        [email]
-    );
-    if (results.length === 0) return null;
-    
-    const user = results[0];
+    await ensureDb();
+    const users = getDb().collection('users');
+    const user: any = await users.findOne({ email });
+    if (!user) return null;
     return {
         id: user.id,
         email: user.email,
-        userType: user.user_type
+        userType: user.user_type || user.userType,
     };
 };
 
 // Get user by ID
 export const getUserById = async (id: string): Promise<AuthUser | null> => {
-    const results: any = await query(
-        'SELECT id, email, user_type FROM users WHERE id = ?',
-        [id]
-    );
-    if (results.length === 0) return null;
-    
-    const user = results[0];
+    await ensureDb();
+    const users = getDb().collection('users');
+    const user: any = await users.findOne({ id });
+    if (!user) return null;
     return {
         id: user.id,
         email: user.email,
-        userType: user.user_type
+        userType: user.user_type || user.userType,
     };
 };
 
@@ -82,17 +85,28 @@ export const createUser = async (
     fullName: string,
     userType: 'tourist' | 'host'
 ): Promise<AuthUser> => {
+    await ensureDb();
+    const users = getDb().collection('users');
     const passwordHash = await hashPassword(password);
-    
-    await query(
-        'INSERT INTO users (id, email, password_hash, full_name, user_type) VALUES (?, ?, ?, ?, ?)',
-        [id, email, passwordHash, fullName, userType]
-    );
+
+    const doc = {
+        id,
+        email,
+        password_hash: passwordHash,
+        full_name: fullName,
+        user_type: userType,
+        country: null,
+        contact_number: null,
+        created_at: new Date(),
+        updated_at: new Date(),
+    };
+
+    await users.insertOne(doc);
 
     return {
         id,
         email,
-        userType
+        userType,
     };
 };
 
@@ -107,47 +121,28 @@ export const updateUserProfile = async (
         password?: string;
     }
 ): Promise<void> => {
-    const fields: string[] = [];
-    const values: any[] = [];
+    await ensureDb();
+    const users = getDb().collection('users');
+    const set: any = {};
 
-    if (updates.fullName !== undefined) {
-        fields.push('full_name = ?');
-        values.push(updates.fullName);
-    }
-    if (updates.country !== undefined) {
-        fields.push('country = ?');
-        values.push(updates.country);
-    }
-    if (updates.contactNumber !== undefined) {
-        fields.push('contact_number = ?');
-        values.push(updates.contactNumber);
-    }
-    if (updates.email !== undefined) {
-        fields.push('email = ?');
-        values.push(updates.email);
-    }
-    if (updates.password !== undefined) {
-        const passwordHash = await hashPassword(updates.password);
-        fields.push('password_hash = ?');
-        values.push(passwordHash);
-    }
+    if (updates.fullName !== undefined) set.full_name = updates.fullName;
+    if (updates.country !== undefined) set.country = updates.country;
+    if (updates.contactNumber !== undefined) set.contact_number = updates.contactNumber;
+    if (updates.email !== undefined) set.email = updates.email;
+    if (updates.password !== undefined) set.password_hash = await hashPassword(updates.password);
 
-    if (fields.length === 0) return;
+    if (Object.keys(set).length === 0) return;
 
-    values.push(userId);
-    const sql = `UPDATE users SET ${fields.join(', ')} WHERE id = ?`;
-    
-    await query(sql, values);
+    set.updated_at = new Date();
+
+    await users.updateOne({ id: userId }, { $set: set });
 };
 
 // Verify password for user
 export const verifyUserPassword = async (userId: string, password: string): Promise<boolean> => {
-    const results: any = await query(
-        'SELECT password_hash FROM users WHERE id = ?',
-        [userId]
-    );
-    
-    if (results.length === 0) return false;
-    
-    return comparePassword(password, results[0].password_hash);
+    await ensureDb();
+    const users = getDb().collection('users');
+    const user: any = await users.findOne({ id: userId });
+    if (!user) return false;
+    return comparePassword(password, user.password_hash);
 };

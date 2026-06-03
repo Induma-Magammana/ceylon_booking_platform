@@ -1,141 +1,60 @@
-import mysql from 'mysql2/promise';
-import { Pool } from 'mysql2/promise';
+import { MongoClient, Db } from 'mongodb';
 
-// Create connection pool
-const pool = mysql.createPool({
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || 'password',
-    database: process.env.DB_NAME || 'ceylon_booking',
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
-});
+const uri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017';
+const dbName = process.env.MONGO_DB_NAME || process.env.MONGO_DB || 'ceylon_booking';
 
-export const getPool = (): Pool => pool;
+const client = new MongoClient(uri);
+let db: Db | null = null;
 
-// Query helper function
-export const query = async (sql: string, values?: any[]) => {
-    const connection = await pool.getConnection();
-    try {
-        const [results] = await connection.execute(sql, values);
-        return results;
-    } finally {
-        connection.release();
+export const connectDB = async (): Promise<Db> => {
+    if (!db) {
+        await client.connect();
+        db = client.db(dbName);
+        console.log('✅ MongoDB client connected');
     }
+    return db;
 };
 
-// Database initialization - Create tables if they don't exist
+export const getDb = (): Db => {
+    if (!db) throw new Error('Database not initialized. Call connectDB() first.');
+    return db as Db;
+};
+
 export const initializeDatabase = async () => {
-    const connection = await pool.getConnection();
-    try {
-        // Users table
-        await connection.execute(`
-            CREATE TABLE IF NOT EXISTS users (
-                id VARCHAR(36) PRIMARY KEY,
-                email VARCHAR(255) UNIQUE NOT NULL,
-                password_hash VARCHAR(255) NOT NULL,
-                full_name VARCHAR(255) NOT NULL,
-                user_type ENUM('tourist', 'host') NOT NULL,
-                country VARCHAR(100),
-                contact_number VARCHAR(20),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                INDEX idx_email (email),
-                INDEX idx_user_type (user_type)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        `);
+    const database = await connectDB();
 
-        // Listings table
-        await connection.execute(`
-            CREATE TABLE IF NOT EXISTS listings (
-                id VARCHAR(36) PRIMARY KEY,
-                host_id VARCHAR(36) NOT NULL,
-                title VARCHAR(255) NOT NULL,
-                description TEXT,
-                inventory_type ENUM('slot', 'date') NOT NULL,
-                location VARCHAR(255) NOT NULL,
-                local_price DECIMAL(10, 2) NOT NULL,
-                foreign_price DECIMAL(10, 2) NOT NULL,
-                capacity INT NOT NULL,
-                cover_image VARCHAR(500),
-                social_media_instagram VARCHAR(255),
-                social_media_facebook VARCHAR(255),
-                is_available BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                FOREIGN KEY (host_id) REFERENCES users(id) ON DELETE CASCADE,
-                INDEX idx_host_id (host_id),
-                INDEX idx_location (location),
-                INDEX idx_inventory_type (inventory_type)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        `);
+    // Create collections and indexes similar to previous SQL schema
+    const users = database.collection('users');
+    await users.createIndex({ email: 1 }, { unique: true });
+    await users.createIndex({ user_type: 1 });
 
-        // Bookings table
-        await connection.execute(`
-            CREATE TABLE IF NOT EXISTS bookings (
-                id VARCHAR(36) PRIMARY KEY,
-                listing_id VARCHAR(36) NOT NULL,
-                tourist_id VARCHAR(36) NOT NULL,
-                booking_date DATE NOT NULL,
-                time_slot TIME,
-                quantity INT NOT NULL,
-                total_price DECIMAL(10, 2) NOT NULL,
-                currency ENUM('LKR', 'USD') NOT NULL,
-                status ENUM('pending', 'confirmed', 'cancelled', 'accepted', 'not_paid', 'paid', 'completed') DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE CASCADE,
-                FOREIGN KEY (tourist_id) REFERENCES users(id) ON DELETE CASCADE,
-                INDEX idx_listing_id (listing_id),
-                INDEX idx_tourist_id (tourist_id),
-                INDEX idx_booking_date (booking_date),
-                INDEX idx_status (status)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        `);
+    const listings = database.collection('listings');
+    await listings.createIndex({ host_id: 1 });
+    await listings.createIndex({ location: 1 });
+    await listings.createIndex({ inventory_type: 1 });
 
-        // Reviews table
-        await connection.execute(`
-            CREATE TABLE IF NOT EXISTS reviews (
-                id VARCHAR(36) PRIMARY KEY,
-                listing_id VARCHAR(36) NOT NULL,
-                user_id VARCHAR(36) NOT NULL,
-                booking_id VARCHAR(36),
-                rating INT NOT NULL CHECK (rating >= 1 AND rating <= 5),
-                comment TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE CASCADE,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-                FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE SET NULL,
-                INDEX idx_listing_id (listing_id),
-                INDEX idx_user_id (user_id),
-                INDEX idx_rating (rating)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        `);
+    const bookings = database.collection('bookings');
+    await bookings.createIndex({ listing_id: 1 });
+    await bookings.createIndex({ tourist_id: 1 });
+    await bookings.createIndex({ booking_date: 1 });
+    await bookings.createIndex({ status: 1 });
 
-        // Listing ratings summary table
-        await connection.execute(`
-            CREATE TABLE IF NOT EXISTS listing_ratings (
-                listing_id VARCHAR(36) PRIMARY KEY,
-                review_count INT DEFAULT 0,
-                average_rating DECIMAL(3, 2) DEFAULT 0,
-                five_star INT DEFAULT 0,
-                four_star INT DEFAULT 0,
-                three_star INT DEFAULT 0,
-                two_star INT DEFAULT 0,
-                one_star INT DEFAULT 0,
-                FOREIGN KEY (listing_id) REFERENCES listings(id) ON DELETE CASCADE
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        `);
+    const reviews = database.collection('reviews');
+    await reviews.createIndex({ listing_id: 1 });
+    await reviews.createIndex({ user_id: 1 });
+    await reviews.createIndex({ rating: 1 });
 
-        console.log('✅ Database tables initialized successfully');
-    } finally {
-        connection.release();
-    }
+    const listingRatings = database.collection('listing_ratings');
+    await listingRatings.createIndex({ listing_id: 1 }, { unique: true });
+
+    console.log('✅ MongoDB collections and indexes initialized');
 };
 
-// Close pool
-export const closePool = async () => {
-    await pool.end();
+export const closeClient = async () => {
+    await client.close();
+    db = null;
 };
+
+// NOTE: The project previously exported a SQL `query()` helper.
+// After migration to MongoDB, update `src/utils/queries.ts` and code
+// that uses raw SQL to use MongoDB collections via `getDb()`.

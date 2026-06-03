@@ -5,7 +5,8 @@ import { z } from 'zod';
 import { authMiddleware } from '@/middleware/auth';
 import { authRouter } from '@/api/auth';
 import { initializeDatabase } from '@/utils/database';
-import { query } from '@/utils/database';
+import { getUserById } from '@/utils/auth';
+import { SchedulingService } from '@/services/SchedulingService';
 import { listingQueries, bookingQueries, reviewQueries } from '@/utils/queries';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
@@ -26,6 +27,9 @@ initializeDatabase().catch(err => {
     console.error('Failed to initialize database:', err);
     process.exit(1);
 });
+
+// Scheduling service (uses MongoDB-backed queries)
+const schedulingService = new SchedulingService();
 
 // Health check endpoint
 app.get('/health', (c) => {
@@ -152,35 +156,22 @@ app.get('/api/listings/:listingId/reviews', async (c) => {
     const limit = parseInt(c.req.query('limit') || '10');
     const offset = parseInt(c.req.query('offset') || '0');
 
-    const { data, error } = await supabase
-        .from('reviews')
-        .select(`
-            *,
-            user:users(id, full_name, email)
-        `)
-        .eq('listing_id', listingId)
-        .order('created_at', { ascending: false })
-        .range(offset, offset + limit - 1);
-
-    if (error) {
-        return c.json({ error: error.message }, 500);
+    try {
+        const data = await reviewQueries.getByListing(listingId, limit, offset);
+        return c.json({ success: true, data });
+    } catch (err: any) {
+        return c.json({ error: err.message }, 500);
     }
-
-    return c.json({ success: true, data });
 });
 
 // Get rating summary for a listing (must be before /api/listings/:id route)
 app.get('/api/listings/:listingId/rating-summary', async (c) => {
     const listingId = c.req.param('listingId');
 
-    const { data, error } = await supabase
-        .from('listing_ratings')
-        .select('*')
-        .eq('listing_id', listingId)
-        .single();
-
-    if (error) {
-        // If no reviews exist, return default values
+    try {
+        const data = await reviewQueries.getRatingSummary(listingId);
+        return c.json({ success: true, data });
+    } catch (err: any) {
         return c.json({
             success: true,
             data: {
@@ -195,33 +186,19 @@ app.get('/api/listings/:listingId/rating-summary', async (c) => {
             }
         });
     }
-
-    return c.json({ success: true, data });
 });
 
 // Get a single listing by ID
 app.get('/api/listings/:id', async (c) => {
     const id = c.req.param('id');
 
-    const { data, error } = await supabase
-        .from('listings')
-        .select(`
-            *,
-            host:users!listings_host_id_fkey (
-                id,
-                full_name,
-                email,
-                contact_number
-            )
-        `)
-        .eq('id', id)
-        .single();
-
-    if (error) {
-        return c.json({ error: 'Listing not found' }, 404);
+    try {
+        const data = await listingQueries.getById(id);
+        if (!data) return c.json({ error: 'Listing not found' }, 404);
+        return c.json({ success: true, data });
+    } catch (err: any) {
+        return c.json({ error: err.message }, 500);
     }
-
-    return c.json({ success: true, data });
 });
 
 // Update listing availability (hosts only)
@@ -231,36 +208,12 @@ app.patch('/api/listings/:id/availability', authMiddleware, async (c) => {
         const body = await c.req.json();
         const { isAvailable } = body;
         const user = c.get('user');
-        const token = c.req.header('Authorization')?.replace('Bearer ', '') || '';
-        const authSupabase = getAuthenticatedClient(token);
-
         // Verify listing belongs to this host
-        const { data: listing, error: fetchError } = await authSupabase
-            .from('listings')
-            .select('host_id')
-            .eq('id', id)
-            .single();
+        const listing = await listingQueries.getById(id);
+        if (!listing) return c.json({ error: 'Listing not found' }, 404);
+        if (listing.hostId !== user.id) return c.json({ error: 'Unauthorized' }, 403);
 
-        if (fetchError || !listing) {
-            return c.json({ error: 'Listing not found' }, 404);
-        }
-
-        if (listing.host_id !== user.id) {
-            return c.json({ error: 'Unauthorized' }, 403);
-        }
-
-        // Update availability
-        const { data, error } = await authSupabase
-            .from('listings')
-            .update({ is_available: isAvailable })
-            .eq('id', id)
-            .select()
-            .single();
-
-        if (error) {
-            return c.json({ error: error.message }, 400);
-        }
-
+        const data = await listingQueries.update(id, { isAvailable });
         return c.json({ success: true, data });
     } catch (error: any) {
         return c.json({ error: error.message || 'Invalid request' }, 400);
@@ -273,23 +226,10 @@ app.put('/api/listings/:id', authMiddleware, async (c) => {
         const id = c.req.param('id');
         const body = await c.req.json();
         const user = c.get('user');
-        const token = c.req.header('Authorization')?.replace('Bearer ', '') || '';
-        const authSupabase = getAuthenticatedClient(token);
-
         // Verify listing belongs to this host
-        const { data: listing, error: fetchError } = await authSupabase
-            .from('listings')
-            .select('host_id')
-            .eq('id', id)
-            .single();
-
-        if (fetchError || !listing) {
-            return c.json({ error: 'Listing not found' }, 404);
-        }
-
-        if (listing.host_id !== user.id) {
-            return c.json({ error: 'Unauthorized' }, 403);
-        }
+        const listing = await listingQueries.getById(id);
+        if (!listing) return c.json({ error: 'Listing not found' }, 404);
+        if (listing.hostId !== user.id) return c.json({ error: 'Unauthorized' }, 403);
 
         // Update listing
         const updateData: Record<string, any> = {};
@@ -304,17 +244,7 @@ app.put('/api/listings/:id', authMiddleware, async (c) => {
         if (body.socialMediaInstagram !== undefined) updateData.social_media_instagram = body.socialMediaInstagram;
         if (body.socialMediaFacebook !== undefined) updateData.social_media_facebook = body.socialMediaFacebook;
 
-        const { data, error } = await authSupabase
-            .from('listings')
-            .update(updateData)
-            .eq('id', id)
-            .select()
-            .single();
-
-        if (error) {
-            return c.json({ error: error.message }, 400);
-        }
-
+        const data = await listingQueries.update(id, updateData);
         return c.json({ success: true, data });
     } catch (error: any) {
         return c.json({ error: error.message || 'Invalid request' }, 400);
@@ -328,13 +258,13 @@ app.post('/api/bookings/check-availability', async (c) => {
     try {
         const { listingId, bookingDate, timeSlot, quantity } = await c.req.json();
 
-        const date = new Date(bookingDate);
-        const result = await schedulingService.checkAvailability(
-            listingId,
-            date,
-            timeSlot || null,
-            quantity
-        );
+            const date = new Date(bookingDate);
+            const result = await schedulingService.checkAvailability(
+                listingId,
+                date,
+                timeSlot || null,
+                quantity
+            );
 
         return c.json({
             success: true,
@@ -352,84 +282,54 @@ app.post('/api/bookings', authMiddleware, async (c) => {
     try {
         const body = await c.req.json();
         const { listingId, bookingDate, quantity, timeSlot } = body;
-        const token = c.req.header('Authorization')?.replace('Bearer ', '') || '';
-        const authSupabase = getAuthenticatedClient(token);
 
         // Security: Get authenticated user ID
         const authContext = c.get('user');
         const touristId = authContext.id;
 
-        // Use authenticated service
-        const authSchedulingService = new SchedulingService(authSupabase);
-
         // 1. Fetch User (Tourist)
-        const { data: user, error: userError } = await authSupabase
-            .from('users')
-            .select('*')
-            .eq('id', touristId)
-            .single();
-
-        if (userError || !user) {
-            return c.json({ error: 'Tourist not found' }, 404);
-        }
+        const user = await getUserById(touristId);
+        if (!user) return c.json({ error: 'Tourist not found' }, 404);
 
         // 2. Fetch Listing
-        const { data: listing, error: listingError } = await authSupabase
-            .from('listings')
-            .select('*')
-            .eq('id', listingId)
-            .single();
-
-        if (listingError || !listing) {
-            return c.json({ error: 'Listing not found' }, 404);
-        }
+        const listing = await listingQueries.getById(listingId);
+        if (!listing) return c.json({ error: 'Listing not found' }, 404);
 
         // 3. Calculate Price
-        // Map DB fields (snake_case) to Domain model (camelCase)
-        const domainListing: Listing = {
+        const domainListing: any = {
             ...listing,
-            hostId: listing.host_id,
-            inventoryType: listing.inventory_type,
-            localPrice: listing.local_price,
-            foreignPrice: listing.foreign_price,
-            createdAt: new Date(listing.created_at),
+            hostId: listing.hostId,
+            inventoryType: listing.inventoryType,
+            localPrice: listing.localPrice,
+            foreignPrice: listing.foreignPrice,
+            createdAt: listing.createdAt,
         };
 
-        const domainUser: User = {
+        const domainUser: any = {
             id: user.id,
             email: user.email,
-            userType: user.user_type,
-            fullName: user.full_name, // Map snake_case to camelCase
-            country: user.country,
-            createdAt: new Date(user.created_at),
+            userType: user.userType,
+            fullName: (user as any).full_name || '',
+            country: (user as any).country,
+            createdAt: (user as any).created_at,
         };
 
-        const priceResult = pricingService.calculatePrice(
-            domainListing,
-            domainUser,
-            quantity
-        );
+        const priceResult = pricingService.calculatePrice(domainListing, domainUser, quantity);
 
         // 4. Create Booking
-        const result = await authSchedulingService.createBooking(
+        const result = await schedulingService.createBooking(
             listingId,
             touristId,
             new Date(bookingDate),
             quantity,
-            priceResult.totalPrice, // Use calculated price
-            priceResult.currency,   // Use calculated currency
+            priceResult.totalPrice,
+            priceResult.currency,
             timeSlot || null
         );
 
-        if (!result.success) {
-            return c.json({ error: result.error }, 409);
-        }
+        if (!result.success) return c.json({ error: result.error }, 409);
 
-        return c.json({
-            success: true,
-            bookingId: result.bookingId,
-            price: priceResult // Return pricing details
-        }, 201);
+        return c.json({ success: true, bookingId: result.bookingId, price: priceResult }, 201);
     } catch (error: any) {
         return c.json({ error: error.message || 'Invalid request' }, 400);
     }
@@ -439,67 +339,40 @@ app.post('/api/bookings', authMiddleware, async (c) => {
 // Get a booking by ID (Protected)
 app.get('/api/bookings/:id', authMiddleware, async (c) => {
     const id = c.req.param('id');
-    const token = c.req.header('Authorization')?.replace('Bearer ', '') || '';
-    const authSupabase = getAuthenticatedClient(token);
 
-    const { data, error } = await authSupabase
-        .from('bookings')
-        .select('*')
-        .eq('id', id)
-        .single();
-
-    if (error) {
-        return c.json({ error: 'Booking not found' }, 404);
+    try {
+        const data = await bookingQueries.getById(id);
+        if (!data) return c.json({ error: 'Booking not found' }, 404);
+        return c.json({ success: true, data });
+    } catch (err: any) {
+        return c.json({ error: err.message }, 500);
     }
-
-    return c.json({ success: true, data });
 });
 
 // Get all bookings for a tourist
 // Get all bookings for a tourist (Protected)
 app.get('/api/tourists/:touristId/bookings', authMiddleware, async (c) => {
     const touristId = c.req.param('touristId');
-    const token = c.req.header('Authorization')?.replace('Bearer ', '') || '';
-    const authSupabase = getAuthenticatedClient(token);
 
-    const { data, error } = await authSupabase
-        .from('bookings')
-        .select(`
-      *,
-      listing:listings(*)
-    `)
-        .eq('tourist_id', touristId)
-        .order('created_at', { ascending: false });
-
-    if (error) {
-        return c.json({ error: error.message }, 500);
+    try {
+        const data = await bookingQueries.getByTourist(touristId);
+        return c.json({ success: true, data });
+    } catch (err: any) {
+        return c.json({ error: err.message }, 500);
     }
-
-    return c.json({ success: true, data });
 });
 
 // Get all bookings for a listing
 // Get all bookings for a listing (Protected)
 app.get('/api/listings/:listingId/bookings', authMiddleware, async (c) => {
     const listingId = c.req.param('listingId');
-    const token = c.req.header('Authorization')?.replace('Bearer ', '') || '';
-    const authSupabase = getAuthenticatedClient(token);
 
-    const { data, error } = await authSupabase
-        .from('bookings')
-        .select(`
-            *,
-            tourist:users!tourist_id(id, full_name, email, contact_number),
-            listing:listings(id, title, location)
-        `)
-        .eq('listing_id', listingId)
-        .order('booking_date', { ascending: true });
-
-    if (error) {
-        return c.json({ error: error.message }, 500);
+    try {
+        const data = await bookingQueries.getByListing(listingId);
+        return c.json({ success: true, data });
+    } catch (err: any) {
+        return c.json({ error: err.message }, 500);
     }
-
-    return c.json({ success: true, data });
 });
 
 // Update booking status (hosts only)
@@ -509,8 +382,6 @@ app.patch('/api/bookings/:id/status', authMiddleware, async (c) => {
         const body = await c.req.json();
         const { status } = body;
         const user = c.get('user');
-        const token = c.req.header('Authorization')?.replace('Bearer ', '') || '';
-        const authSupabase = getAuthenticatedClient(token);
 
         // Validate status
         const validStatuses = ['pending', 'confirmed', 'cancelled', 'accepted', 'not_paid', 'paid', 'completed'];
@@ -519,40 +390,16 @@ app.patch('/api/bookings/:id/status', authMiddleware, async (c) => {
         }
 
         // Get booking and verify it belongs to a listing owned by this host
-        const { data: booking, error: fetchError } = await authSupabase
-            .from('bookings')
-            .select(`
-                *,
-                listing:listings!listing_id(id, host_id)
-            `)
-            .eq('id', id)
-            .single();
-
-        if (fetchError || !booking) {
-            return c.json({ error: 'Booking not found' }, 404);
+        const booking = await bookingQueries.getById(id);
+        if (!booking) return c.json({ error: 'Booking not found' }, 404);
+        if (!booking.listing) {
+            // fetch listing
+            const listing = await listingQueries.getById(booking.listingId || booking.listing_id);
+            booking.listing = listing;
         }
+        if (booking.listing.hostId !== user.id) return c.json({ error: 'Unauthorized' }, 403);
 
-        // Check if user is the host of this listing
-        if (booking.listing.host_id !== user.id) {
-            return c.json({ error: 'Unauthorized' }, 403);
-        }
-
-        // Update booking status
-        const { data, error } = await authSupabase
-            .from('bookings')
-            .update({ status })
-            .eq('id', id)
-            .select(`
-                *,
-                tourist:users!tourist_id(id, full_name, email, contact_number),
-                listing:listings(id, title, location)
-            `)
-            .single();
-
-        if (error) {
-            return c.json({ error: error.message }, 400);
-        }
-
+        const data = await bookingQueries.updateStatus(id, status);
         return c.json({ success: true, data });
     } catch (error: any) {
         return c.json({ error: error.message || 'Invalid request' }, 400);
@@ -565,8 +412,6 @@ app.patch('/api/bookings/:id/status', authMiddleware, async (c) => {
 app.post('/api/reviews', authMiddleware, async (c) => {
     try {
         const body = await c.req.json();
-        const token = c.req.header('Authorization')?.replace('Bearer ', '') || '';
-        const authSupabase = getAuthenticatedClient(token);
         const user = c.get('user');
 
         // Validate the review data
@@ -579,25 +424,16 @@ app.post('/api/reviews', authMiddleware, async (c) => {
 
         // If bookingId provided, verify the booking exists and belongs to the user
         if (validatedData.bookingId) {
-            const { data: booking, error: bookingError } = await authSupabase
-                .from('bookings')
-                .select('*')
-                .eq('id', validatedData.bookingId)
-                .eq('tourist_id', user.id)
-                .eq('status', 'confirmed')
-                .single();
-
-            if (bookingError || !booking) {
+            const booking = await bookingQueries.getById(validatedData.bookingId);
+            if (!booking || booking.touristId !== user.id || booking.status !== 'confirmed') {
                 return c.json({ error: 'Booking not found or not confirmed' }, 404);
             }
 
-            // Verify booking is for the correct listing
-            if (booking.listing_id !== validatedData.listingId) {
+            if (booking.listingId !== validatedData.listingId) {
                 return c.json({ error: 'Booking does not match listing' }, 400);
             }
 
-            // Check if booking date has passed
-            const bookingDate = new Date(booking.booking_date);
+            const bookingDate = new Date(booking.bookingDate);
             const today = new Date();
             today.setHours(0, 0, 0, 0);
             if (bookingDate >= today) {
@@ -605,23 +441,15 @@ app.post('/api/reviews', authMiddleware, async (c) => {
             }
         }
 
-        const { data, error } = await authSupabase
-            .from('reviews')
-            .insert({
-                listing_id: validatedData.listingId,
-                user_id: validatedData.userId,
-                booking_id: validatedData.bookingId,
-                rating: validatedData.rating,
-                comment: validatedData.comment,
-            })
-            .select()
-            .single();
+        const created = await reviewQueries.create({
+            listingId: validatedData.listingId,
+            userId: validatedData.userId,
+            bookingId: validatedData.bookingId,
+            rating: validatedData.rating,
+            comment: validatedData.comment,
+        });
 
-        if (error) {
-            return c.json({ error: error.message }, 400);
-        }
-
-        return c.json({ success: true, data }, 201);
+        return c.json({ success: true, data: created }, 201);
     } catch (error: any) {
         return c.json({ error: error.message || 'Invalid request' }, 400);
     }
@@ -633,27 +461,12 @@ app.get('/api/reviews', async (c) => {
     const limit = parseInt(c.req.query('limit') || '20');
     const offset = parseInt(c.req.query('offset') || '0');
 
-    let query = supabase
-        .from('reviews')
-        .select(`
-            *,
-            user:users(id, full_name),
-            listing:listings(id, title, location)
-        `)
-        .order('created_at', { ascending: false })
-        .range(offset, offset + limit - 1);
-
-    if (userId) {
-        query = query.eq('user_id', userId);
+    try {
+        const data = await reviewQueries.getAll(userId ? { userId } : undefined, limit, offset);
+        return c.json({ success: true, data });
+    } catch (err: any) {
+        return c.json({ error: err.message }, 500);
     }
-
-    const { data, error } = await query;
-
-    if (error) {
-        return c.json({ error: error.message }, 500);
-    }
-
-    return c.json({ success: true, data });
 });
 
 // Update a review
@@ -661,36 +474,13 @@ app.put('/api/reviews/:id', authMiddleware, async (c) => {
     try {
         const id = c.req.param('id');
         const body = await c.req.json();
-        const token = c.req.header('Authorization')?.replace('Bearer ', '') || '';
-        const authSupabase = getAuthenticatedClient(token);
         const user = c.get('user');
-
-        // Verify review belongs to user
-        const { data: existingReview, error: fetchError } = await authSupabase
-            .from('reviews')
-            .select('*')
-            .eq('id', id)
-            .eq('user_id', user.id)
-            .single();
-
-        if (fetchError || !existingReview) {
+        const existingReview = await reviewQueries.getById(id);
+        if (!existingReview || existingReview.userId !== user.id) {
             return c.json({ error: 'Review not found or unauthorized' }, 404);
         }
 
-        const { data, error } = await authSupabase
-            .from('reviews')
-            .update({
-                rating: body.rating,
-                comment: body.comment,
-            })
-            .eq('id', id)
-            .select()
-            .single();
-
-        if (error) {
-            return c.json({ error: error.message }, 400);
-        }
-
+        const data = await reviewQueries.update(id, body.rating, body.comment);
         return c.json({ success: true, data });
     } catch (error: any) {
         return c.json({ error: error.message || 'Invalid request' }, 400);
@@ -701,31 +491,13 @@ app.put('/api/reviews/:id', authMiddleware, async (c) => {
 app.delete('/api/reviews/:id', authMiddleware, async (c) => {
     try {
         const id = c.req.param('id');
-        const token = c.req.header('Authorization')?.replace('Bearer ', '') || '';
-        const authSupabase = getAuthenticatedClient(token);
         const user = c.get('user');
-
-        // Verify review belongs to user
-        const { data: existingReview, error: fetchError } = await authSupabase
-            .from('reviews')
-            .select('*')
-            .eq('id', id)
-            .eq('user_id', user.id)
-            .single();
-
-        if (fetchError || !existingReview) {
+        const existingReview = await reviewQueries.getById(id);
+        if (!existingReview || existingReview.userId !== user.id) {
             return c.json({ error: 'Review not found or unauthorized' }, 404);
         }
 
-        const { error } = await authSupabase
-            .from('reviews')
-            .delete()
-            .eq('id', id);
-
-        if (error) {
-            return c.json({ error: error.message }, 400);
-        }
-
+        await reviewQueries.delete(id);
         return c.json({ success: true, message: 'Review deleted' });
     } catch (error: any) {
         return c.json({ error: error.message || 'Invalid request' }, 400);
